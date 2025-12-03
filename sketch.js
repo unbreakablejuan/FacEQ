@@ -99,3 +99,11 @@ function mousePressed() {
   }
   mic.start();
 }
+
+function touchStarted(){
+   if (getAudioContext().state !== 'running') {
+    getAudioContext().resume();
+  }
+  mic.start();
+}
+
