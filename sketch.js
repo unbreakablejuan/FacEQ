@@ -1,21 +1,25 @@
 let mic;
 let fft;
+let peakDetect;
 let faces = [];
 let bgColor;
 
-// normalized band values (0–1)
 let bassN = 0;
 let midN = 0;
 let trebleN = 0;
 
-// per-band gains (will be controlled by sliders)
 let bassGain = 0.4;
 let midGain = 1.0;
 let trebleGain = 2.0;
 
-// sliders + UI toggle
 let bassSlider, midSlider, trebleSlider;
 let showEQ = false;
+
+let faceCol = 3;
+let faceRow = 3
+;
+
+let autoPalette = false;  // peak detection default state/ false = no change, true = color changing
 
 // =========================
 //   FACE CLASS
@@ -25,7 +29,15 @@ class Face {
     this.bandName = bandName;   // "bass", "mid", or "treble"
 
     this.offset = 5;
-    this.mouthH = 10;
+    this.mouthH = 200;
+
+    this.intialEyeH = 50;
+    this.intialEyeW = 50;
+
+    this.leftEyeRan = random(4, 8);
+    this.rightEyeRan = random(4, 8);
+    this.mouthWidth = random(2, 5);
+    this.mouthYloc = random(0, 200);
 
     // colors for THIS face
     this.c1 = color(baseHue, s, b);
@@ -50,75 +62,72 @@ class Face {
     let t = (now - this.blinkStart) / this.blinkDuration;
 
     if (t < 1) {
-      this.eyeOpenAmount = 1 - t;
+      this.eyeOpenAmount = 1 - t;   // closing
     } else if (t < 2) {
-      this.eyeOpenAmount = t - 1;
+      this.eyeOpenAmount = t - 1;   // opening
     } else {
-      this.eyeOpenAmount = 1;
+      this.eyeOpenAmount = 1;       // fully open
     }
 
     this.eyeOpenAmount = constrain(this.eyeOpenAmount, 0, 1);
   }
 
   getBandLevel() {
-    // use global normalized band values
     if (this.bandName === "bass")   return bassN;
     if (this.bandName === "mid")    return midN;
     if (this.bandName === "treble") return trebleN;
     return 0;
   }
 
-  // draw ONE face in a cell centered at (cx, cy) with size (cellW, cellH)
   drawFace(cx, cy, cellW, cellH) {
     this.updateBlink();
 
     // ==== EYES ====
-    let eyeW = 50;
-    let eyeH = 50 * this.eyeOpenAmount;
+    let eyeW = this.intialEyeW;
+    let eyeH = this.intialEyeH * this.eyeOpenAmount;
     let offset = this.offset;
 
     noStroke();
 
-    let leftEyeX  = cx - cellW / 5;
-    let leftEyeY  = cy - cellH / 5.5;
-    let rightEyeX = cx + cellW / 5;
-    let rightEyeY = cy - cellH / 8;
+    let leftEyeX  = cx - cellW / this.leftEyeRan;
+    let leftEyeY  = cy - cellH / this.leftEyeRan;
+    let rightEyeX = cx + cellW / this.rightEyeRan;
+    let rightEyeY = cy - cellH / this.rightEyeRan;
 
     // Left eye
     fill(this.c3);
     ellipse(leftEyeX, leftEyeY, eyeW, eyeH);
     fill(this.c1);
-    ellipse(leftEyeX - offset,
-            leftEyeY - offset,
-            eyeW, eyeH);
+    ellipse(leftEyeX - offset, leftEyeY - offset, eyeW, eyeH);
 
     // Right eye
     fill(this.c3);
     ellipse(rightEyeX, rightEyeY, eyeW, eyeH);
     fill(this.c1);
-    ellipse(rightEyeX - offset,
-            rightEyeY - offset,
-            eyeW, eyeH);
+    ellipse(rightEyeX - offset, rightEyeY - offset, eyeW, eyeH);
 
     // ==== MOUTH ====
     fill(this.c3);
     noStroke();
 
-    // use per-band energy instead of mic.getLevel()
     let bandVal = this.getBandLevel(); // 0–1
+    // optional curve for more motion:
+    let mouthLevel = pow(bandVal, 0.7);
 
-    let minMouthHeight = cellH / 30;
-    let maxMouthHeight = cellH / 6;
+    let minMouthHeight = cellH / 20;
+    let maxMouthHeight = cellH / 3;
 
-    let targetMouthH = map(bandVal, 0, 1, minMouthHeight, maxMouthHeight, true);
-    this.mouthH = lerp(this.mouthH, targetMouthH, 0.4);
+    let targetMouthH = map(mouthLevel, 0, 1, minMouthHeight, maxMouthHeight, true);
+    this.mouthH = lerp(this.mouthH, targetMouthH, 1);
 
-    rect(cx, cy, cellW / 4, this.mouthH);
+    rect(cx, cy + this.mouthYloc, cellW / this.mouthWidth, this.mouthH);
     fill(this.c1);
-    rect(cx - offset,
-         cy - offset,
-         (cellW / 4) - offset,
-         this.mouthH - offset);
+    rect(
+      cx - offset,
+      (cy + this.mouthYloc) - offset,
+      (cellW / 4) - offset,
+      this.mouthH - offset
+    );
   }
 }
 
@@ -134,10 +143,22 @@ function randomizeColors() {
     faces[i].c2 = color((baseHue + 120) % 360, s, b);
     faces[i].c3 = color((baseHue + 240) % 360, s, b);
   }
-  // Use first face's c2 as background
   if (faces.length > 0) {
     bgColor = faces[0].c2;
   }
+}
+
+// one place to handle “W behavior”
+function triggerPaletteChange() {
+  randomizeColors();
+}
+
+// Map raw FFT energy (0–255) into a juicy 0–1 response
+function bandResponse(energy, gain, floor, ceiling, curve = 0.6) {
+  let norm = map(energy, floor, ceiling, 0, 1, true); // clamp 0–1
+  norm = pow(norm, curve);   // curve response
+  norm *= gain;              // apply sensitivity
+  return constrain(norm, 0, 1);
 }
 
 // =========================
@@ -149,13 +170,13 @@ function setup() {
   colorMode(HSB, 360, 100, 100);
 
   mic = new p5.AudioIn();
-
   fft = new p5.FFT(0.8, 1024);
   fft.setInput(mic);
 
-  // create 6 faces, mapping columns to bands:
-  // col 0 (left) = bass, col 1 (middle) = mid, col 2 (right) = treble
-  let numFaces = 6;
+  // Peak detector tuned to low-ish (bass) for tempo-ish behavior
+  peakDetect = new p5.PeakDetect(20, 200, 0.35, 20);
+
+  let numFaces = faceCol * faceRow;
   for (let i = 0; i < numFaces; i++) {
     let col = i % 3;  // 0,1,2 repeating
     let bandName = (col === 0) ? "bass" :
@@ -169,10 +190,10 @@ function setup() {
     if (i === 0) bgColor = f.c2;
   }
 
-  // === Sliders for EQ gains (hidden by default) ===
-  bassSlider = createSlider(0, 3, bassGain, 0.01);  // 0–3
-  midSlider = createSlider(0, 3, midGain, 0.01);    // 0–3
-  trebleSlider = createSlider(0, 5, trebleGain, 0.01); // 0–5
+  // Sliders for EQ
+  bassSlider = createSlider(0, 3, bassGain, 0.01);
+  midSlider = createSlider(0, 3, midGain, 0.01);
+  trebleSlider = createSlider(0, 5, trebleGain, 0.01);
 
   bassSlider.position(20, 20);
   midSlider.position(20, 50);
@@ -187,34 +208,34 @@ function draw() {
   background(bgColor);
 
   // === AUDIO / FFT ===
-  if (mic.enabled) {
+  if (mic && mic.enabled) {
     fft.analyze();
+    peakDetect.update(fft);
 
-    let bass   = fft.getEnergy("bass");   // 20–140 Hz
-    let mid    = fft.getEnergy("mid");    // 140–4000 Hz
-    let treble = fft.getEnergy("treble"); // 4000+ Hz
+    // Frequency ranges
+    let bassRaw   = fft.getEnergy(20, 120);    // kick / low bass
+    let midRaw    = fft.getEnergy(120, 2000);  // body, vocals, snares
+    let trebleRaw = fft.getEnergy(2000, 8000); // hats / brightness
 
-    // Get gain values from sliders
     bassGain   = bassSlider.value();
     midGain    = midSlider.value();
     trebleGain = trebleSlider.value();
 
-    // Normalize to 0–1
-    bassN   = bass   / 255;
-    midN    = mid    / 255;
-    trebleN = treble / 255;
+    // floor, ceiling, curve tuned for more motion
+    bassN   = bandResponse(bassRaw,   bassGain,   10, 140, 0.1);
+    midN    = bandResponse(midRaw,    midGain,    5,  120, 0.6);
+    trebleN = bandResponse(trebleRaw, trebleGain, 2,   80, 0.7);
 
-    // Apply EQ gains
-    bassN   = constrain(bassN   * bassGain,   0, 1);
-    midN    = constrain(midN    * midGain,    0, 1);
-    trebleN = constrain(trebleN * trebleGain, 0, 1);
+    if (peakDetect.isDetected && autoPalette) {
+      triggerPaletteChange();
+    }
   } else {
     bassN = midN = trebleN = 0;
   }
 
   // === GRID OF FACES ===
-  let cols = 3;
-  let rows = 2;
+  let cols = faceCol;
+  let rows = faceRow;
   let cellW = width / cols;
   let cellH = height / rows;
   let idx = 0;
@@ -233,15 +254,14 @@ function draw() {
     }
   }
 
-  // Show/label sliders only when EQ is toggled on
   if (showEQ) {
     fill(0, 0, 100);
     noStroke();
     textSize(14);
     textAlign(LEFT, CENTER);
 
-    text("Bass Gain", bassSlider.x * 2 + bassSlider.width, 27);
-    text("Mid Gain", midSlider.x * 2 + midSlider.width, 57);
+    text("Bass Gain",   bassSlider.x * 2 + bassSlider.width, 27);
+    text("Mid Gain",    midSlider.x * 2 + midSlider.width, 57);
     text("Treble Gain", trebleSlider.x * 2 + trebleSlider.width, 87);
   }
 }
@@ -261,11 +281,7 @@ function touchStarted() {
   mic.start();
 }
 
-// =========================
-//   KEY CONTROLS
-// =========================
 function keyPressed() {
-  // Toggle EQ sliders with Q
   if (key === 'q' || key === 'Q') {
     showEQ = !showEQ;
     if (showEQ) {
@@ -279,8 +295,14 @@ function keyPressed() {
     }
   }
 
-  // Refresh colors with W
   if (key === 'w' || key === 'W') {
-    randomizeColors();
+    // manual “tempo change”
+    triggerPaletteChange();
+  }
+
+  if (key === 'e' || key === 'E') {
+    // toggle auto palette change on peaks
+    autoPalette = !autoPalette;
+    // console.log("Auto palette:", autoPalette);
   }
 }
